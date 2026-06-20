@@ -1,0 +1,1 @@
+If primary storage is on nfs, which was assigned from CLoudstack management node. After rebooting managment node. NFS service was not enbaled, due to this, primar storage went into offline state and Host were in conneting state after management came oline. So, to resolve the issue, nfs started and then systems vm came online and hosts also connected back
