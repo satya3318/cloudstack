@@ -1,0 +1,149 @@
+╔══════════════════════════════════════════════════════════════════════════════════╗
+║                        CLOUDSTACK HIGH AVAILABILITY SETUP                      ║
+╚══════════════════════════════════════════════════════════════════════════════════╝
+
+                              ┌─────────────────┐
+                              │     CLIENTS      │
+                              │  Browser / API   │
+                              └────────┬─────────┘
+                                       │
+                              ┌────────▼─────────┐
+                              │  VIRTUAL IP (VIP) │
+                              │   192.168.0.182   │
+                              │  VRRP / Keepalived│
+                              └────────┬──────────┘
+                                       │
+                    ┌──────────────────┴──────────────────┐
+                    │                                     │
+         ┌──────────▼──────────┐             ┌───────────▼─────────┐
+         │       NODE 1        │◄── VRRP ───►│       NODE 2        │
+         │    192.168.0.180    │   Heartbeat  │    192.168.0.181    │
+         │  ┌───────────────┐  │             │  ┌───────────────┐  │
+         │  │  Keepalived   │  │             │  │  Keepalived   │  │
+         │  │   (MASTER)    │  │             │  │   (BACKUP)    │  │
+         │  │  Holds VIP    │  │             │  │  Takes VIP    │  │
+         │  │               │  │             │  │  on failure   │  │
+         │  └───────────────┘  │             │  └───────────────┘  │
+         │  ┌───────────────┐  │             │  ┌───────────────┐  │
+         │  │   HAProxy     │  │             │  │   HAProxy     │  │
+         │  │  :8089 (HTTP) │  │             │  │  :8089 (HTTP) │  │
+         │  │  :8490 (HTTPS)│  │             │  │  :8490 (HTTPS)│  │
+         │  │  :3306 (MySQL)│  │             │  │  :3306 (MySQL)│  │
+         │  │  :9000 (Stats)│  │             │  │  :9000 (Stats)│  │
+         │  └───────────────┘  │             │  └───────────────┘  │
+         │  ┌───────────────┐  │             │  ┌───────────────┐  │
+         │  │  CloudStack   │  │             │  │  CloudStack   │  │
+         │  │  Management   │  │             │  │  Management   │  │
+         │  │    :8080      │  │             │  │    :8080      │  │
+         │  │    :8443      │  │             │  │    :8443      │  │
+         │  └───────────────┘  │             │  └───────────────┘  │
+         │  ┌───────────────┐  │             │  ┌───────────────┐  │
+         │  │    MariaDB    │◄─┼─── wsrep ──►│─►│    MariaDB    │  │
+         │  │  Galera Node1 │  │  :4567/4568 │  │  Galera Node2 │  │
+         │  │    :3306      │  │             │  │    :3306      │  │
+         │  └───────────────┘  │             │  └───────────────┘  │
+         └─────────────────────┘             └─────────────────────┘
+                                                        │
+                                             ┌──────────▼──────────┐
+                                             │    GARBD NODE        │
+                                             │  Galera Arbitrator   │
+                                             │  (Quorum / Witness)  │
+                                             └─────────────────────┘
+
+
+╔══════════════════════════════════════════════════════════════════════════════════╗
+║                            TRAFFIC FLOW                                        ║
+╚══════════════════════════════════════════════════════════════════════════════════╝
+
+  UI / API TRAFFIC
+  ─────────────────
+  Client ──► VIP:8089 ──► HAProxy ──► cs-mgmt1 :8080  (node1, sticky: apcs1)
+                                  └──► cs-mgmt2 :8080  (node2, sticky: apcs2)
+
+  DATABASE TRAFFIC
+  ─────────────────
+  CloudStack ──► VIP:3306 ──► HAProxy ──► galera1 :3306  (node1)
+                                      └──► galera2 :3306  (node2)
+
+  GALERA REPLICATION
+  ───────────────────
+  galera1 ◄──── wsrep :4567 ────► galera2
+       └──────── IST  :4568 ──────┘
+       └──────── SST  :4444 ──────┘
+
+
+╔══════════════════════════════════════════════════════════════════════════════════╗
+║                          FAILOVER SCENARIOS                                    ║
+╚══════════════════════════════════════════════════════════════════════════════════╝
+
+  SCENARIO 1 — DB fails on node1
+  ────────────────────────────────
+  galera1 DOWN
+       │
+       ▼
+  HAProxy health check fails for galera1
+       │
+       ▼
+  All DB traffic routes to galera2
+       │
+       ▼
+  Both CS management nodes continue via VIP ✓
+
+  SCENARIO 2 — Management fails on node1
+  ────────────────────────────────────────
+  cs-mgmt1 DOWN
+       │
+       ▼
+  HAProxy HTTP check fails for cs-mgmt1
+       │
+       ▼
+  All UI traffic routes to cs-mgmt2
+       │
+       ▼
+  Portal remains accessible ✓
+
+  SCENARIO 3 — Node1 completely down
+  ────────────────────────────────────
+  node1 DOWN (DB + Management + Keepalived)
+       │
+       ▼
+  Keepalived VRRP detects master failure (~2s)
+       │
+       ▼
+  VIP moves to node2
+       │
+       ▼
+  HAProxy on node2 serves all traffic
+       │
+       ▼
+  CloudStack accessible — session re-login required ✓
+
+
+╔══════════════════════════════════════════════════════════════════════════════════╗
+║                            PORT REFERENCE                                      ║
+╚══════════════════════════════════════════════════════════════════════════════════╝
+
+  SERVICE               PORT    PROTOCOL   COMPONENT
+  ─────────────────────────────────────────────────────────
+  CloudStack UI/API     8089    HTTP       HAProxy frontend
+  CloudStack HTTPS      8490    HTTPS      HAProxy frontend
+  CloudStack Mgmt       8080    HTTP       Backend (each node)
+  CloudStack Mgmt SSL   8443    HTTPS      Backend (each node)
+  MySQL / Galera        3306    TCP        HAProxy frontend + backend
+  Galera Replication    4567    TCP        wsrep (node to node)
+  Galera IST            4568    TCP        Incremental State Transfer
+  Galera SST            4444    TCP        Snapshot State Transfer
+  HAProxy Stats         9000    HTTP       Per node (not on VIP)
+  VRRP                  112     IP         Keepalived (node to node)
+
+
+╔══════════════════════════════════════════════════════════════════════════════════╗
+║                             IP REFERENCE                                       ║
+╚══════════════════════════════════════════════════════════════════════════════════╝
+
+  ROLE                          IP
+  ──────────────────────────────────────────
+  Node 1 (apcs1)                192.168.0.180
+  Node 2 (apcs2)                192.168.0.181
+  Virtual IP / VIP              192.168.0.182
+  Galera Cluster Name           cloudstack_cluster
