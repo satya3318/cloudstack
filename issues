@@ -1,1 +1,61 @@
 If primary storage is on nfs, which was assigned from CLoudstack management node. After rebooting managment node. NFS service was not enbaled, due to this, primar storage went into offline state and Host were in conneting state after management came oline. So, to resolve the issue, nfs started and then systems vm came online and hosts also connected back
+
+
+
+TCP mode vs HTTP mode for CloudStack
+TCP modeHTTP modeHealth checkOnly checks if port 8080 is openActually sends HTTP request and checks response codeDetects broken CS managementNo — port stays open even when CS has no DBYes — CS returns errors when DB is downSticky sessionsNot possiblePossible via cookieYour invalid session issueStill happensFixed
+
+With TCP mode your problem comes back
+When node1's DB goes down:
+
+Port 8080 on node1 is still open — Tomcat is running
+HAProxy TCP check passes — thinks node1 is healthy
+HAProxy keeps sending traffic to broken node1
+Users get invalid sessions
+
+
+Change to HTTP mode
+haproxylisten cloudstack_http
+    bind 192.168.0.182:8089
+    mode http
+    balance roundrobin
+    cookie JSESSIONID prefix nocache
+    option httpchk GET /client/api?command=listApis&response=json
+    http-check expect status 200
+    timeout check 10s
+    default-server inter 5s fall 2 rise 3
+    server cs-mgmt1 192.168.0.180:8080 check cookie cs1
+    server cs-mgmt2 192.168.0.181:8080 check cookie cs2
+bashhaproxy -c -f /etc/haproxy/haproxy.cfg
+systemctl reload haproxy
+
+What about HTTPS backend
+haproxylisten cloudstack_https
+    bind 192.168.0.182:8490
+    mode tcp
+    balance roundrobin
+    default-server inter 5s fall 2 rise 3
+    server cs-mgmt1 192.168.0.180:8443 check
+    server cs-mgmt2 192.168.0.181:8443 check
+HTTPS backend can stay as tcp mode since SSL termination makes HTTP-level health checks more complex — TCP check is sufficient there as the main health check is already covered on port 8080.You said: server cs-mgmt1 192.server cs-mgmt1 192.168.0.180:8080 check cookie cs1 server cs-mgmt2 192.168.0.181:8080 check cookie cs2 what is cs1 and cs2 here are the random name6:38 PMClaude responded: Yes, cs1 and cs2 are just arbitrary names — you can call them anything you want.Yes, cs1 and cs2 are just arbitrary names — you can call them anything you want. They are the cookie values HAProxy inserts to identify which backend server a client was assigned to.
+
+How it works
+When a user first hits the VIP, HAProxy picks a backend server and adds a cookie value to the response:
+User hits 192.168.0.182:8089
+         ↓
+HAProxy picks cs-mgmt1 and sets cookie:
+JSESSIONID=abc123~cs1
+         ↓
+Next request comes in with that cookie
+         ↓
+HAProxy reads ~cs1 and sends to cs-mgmt1 every time
+So cs1 and cs2 are just sticky session identifiers — HAProxy appends them to the existing JSESSIONID cookie to track which server the user belongs to.
+
+You can name them anything meaningful
+haproxyserver cs-mgmt1 192.168.0.180:8080 check cookie node1
+server cs-mgmt2 192.168.0.181:8080 check cookie node2
+or
+haproxyserver cs-mgmt1 192.168.0.180:8080 check cookie apcs1
+server cs-mgmt2 192.168.0.181:8080 check cookie apcs2
+The name itself doesn't matter — just needs to be unique per server so HAProxy can distinguish which backend to route to. cs1 and cs2 are perfectly fine to keep as is.
+Sonnet 4.6 Low
