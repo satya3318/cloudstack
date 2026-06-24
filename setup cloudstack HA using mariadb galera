@@ -147,3 +147,491 @@
   Node 2 (apcs2)                192.168.0.181
   Virtual IP / VIP              192.168.0.182
   Galera Cluster Name           cloudstack_cluster
+
+Steps :
+╔══════════════════════════════════════════════════════════════════════════════════╗
+║           CLOUDSTACK HIGH AVAILABILITY CLUSTER — COMPLETE SETUP GUIDE            ║
+╚══════════════════════════════════════════════════════════════════════════════════╝
+
+CloudStack HA Cluster Setup Guide
+Environment
+RoleHostnameIPNode 1 (CS + DB + HAProxy)apcs1192.168.0.180Node 2 (CS + DB + HAProxy)apcs2192.168.0.181Virtual IP (VIP)—192.168.0.182Garbd (Arbitrator)garbd192.168.0.183
+
+PHASE 1 — OS Prerequisites (Both Nodes)
+1.1 Set hostnames
+bash# On node1
+hostnamectl set-hostname apcs1.localdomain
+
+# On node2
+hostnamectl set-hostname apcs2.localdomain
+1.2 Configure /etc/hosts on both nodes
+bashcat >> /etc/hosts << 'EOF'
+192.168.0.180   apcs1 apcs1.localdomain
+192.168.0.181   apcs2 apcs2.localdomain
+192.168.0.182   apcs-vip apcs-vip.localdomain
+192.168.0.183   garbd garbd.localdomain
+EOF
+1.3 Disable SELinux
+bashsetenforce 0
+sed -i 's/^SELINUX=.*/SELINUX=permissive/' /etc/selinux/config
+1.4 Disable firewalld (or configure rules)
+bashsystemctl disable --now firewalld
+1.5 Enable IP non-local bind (required for HAProxy on BACKUP node)
+bashcat >> /etc/sysctl.d/99-haproxy.conf << 'EOF'
+net.ipv4.ip_nonlocal_bind = 1
+net.ipv4.ip_forward = 1
+EOF
+sysctl -p /etc/sysctl.d/99-haproxy.conf
+
+PHASE 2 — MariaDB Galera Cluster (Both Nodes)
+2.1 Add MariaDB repository
+bashcat > /etc/yum.repos.d/mariadb.repo << 'EOF'
+[mariadb]
+name = MariaDB
+baseurl = https://downloads.mariadb.com/MariaDB/mariadb-10.11/yum/rhel9-amd64
+gpgkey = https://downloads.mariadb.com/MariaDB/RPM-GPG-KEY-MariaDB
+gpgcheck = 1
+EOF
+2.2 Install MariaDB and Galera
+bashdnf install -y MariaDB-server MariaDB-client galera-4
+systemctl enable mariadb
+2.3 Configure Galera on node1
+bashcat > /etc/my.cnf.d/galera.cnf << 'EOF'
+[mysqld]
+binlog_format=ROW
+default_storage_engine=InnoDB
+innodb_autoinc_lock_mode=2
+innodb_flush_log_at_trx_commit=0
+bind-address=0.0.0.0
+
+# Galera Provider
+wsrep_on=ON
+wsrep_provider=/usr/lib64/galera-4/libgalera_smm.so
+wsrep_provider_options="pc.ignore_quorum=YES"
+
+# Cluster settings
+wsrep_cluster_name="cloudstack_cluster"
+wsrep_cluster_address="gcomm://192.168.0.180,192.168.0.181"
+
+# Node settings
+wsrep_node_address="192.168.0.180"
+wsrep_node_name="galera1"
+
+# SST method
+wsrep_sst_method=mariabackup
+wsrep_sst_auth=sst:sstpassword
+EOF
+2.4 Configure Galera on node2
+bashcat > /etc/my.cnf.d/galera.cnf << 'EOF'
+[mysqld]
+binlog_format=ROW
+default_storage_engine=InnoDB
+innodb_autoinc_lock_mode=2
+innodb_flush_log_at_trx_commit=0
+bind-address=0.0.0.0
+
+# Galera Provider
+wsrep_on=ON
+wsrep_provider=/usr/lib64/galera-4/libgalera_smm.so
+wsrep_provider_options="pc.ignore_quorum=YES"
+
+# Cluster settings
+wsrep_cluster_name="cloudstack_cluster"
+wsrep_cluster_address="gcomm://192.168.0.180,192.168.0.181"
+
+# Node settings
+wsrep_node_address="192.168.0.181"
+wsrep_node_name="galera2"
+
+# SST method
+wsrep_sst_method=mariabackup
+wsrep_sst_auth=sst:sstpassword
+EOF
+2.5 Bootstrap the cluster — node1 only
+bash# On node1 ONLY
+galera_new_cluster
+
+# Secure installation
+mysql_secure_installation
+
+# Create SST user for Galera replication
+mariadb -u root -p << 'EOF'
+CREATE USER 'sst'@'localhost' IDENTIFIED BY 'sstpassword';
+GRANT RELOAD, LOCK TABLES, PROCESS, REPLICATION CLIENT ON *.* TO 'sst'@'localhost';
+FLUSH PRIVILEGES;
+EOF
+2.6 Start node2 and join cluster
+bash# On node2
+systemctl start mariadb
+
+# Verify cluster on either node
+mariadb -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+mariadb -u root -p -e "SHOW STATUS LIKE 'wsrep_cluster_status';"
+mariadb -u root -p -e "SHOW STATUS LIKE 'wsrep_ready';"
+Expected output:
+wsrep_cluster_size    = 2
+wsrep_cluster_status  = Primary
+wsrep_ready           = ON
+2.7 Create CloudStack database and users
+bash# Run on node1 — replicates to node2 automatically
+mariadb -u root -p << 'EOF'
+CREATE DATABASE cloud CHARACTER SET utf8mb4;
+CREATE DATABASE cloud_usage CHARACTER SET utf8mb4;
+
+CREATE USER 'cloud'@'192.168.0.180' IDENTIFIED BY 'cloudpassword';
+CREATE USER 'cloud'@'192.168.0.181' IDENTIFIED BY 'cloudpassword';
+CREATE USER 'cloud'@'192.168.0.182' IDENTIFIED BY 'cloudpassword';
+CREATE USER 'cloud'@'localhost' IDENTIFIED BY 'cloudpassword';
+
+GRANT ALL PRIVILEGES ON cloud.* TO 'cloud'@'192.168.0.180';
+GRANT ALL PRIVILEGES ON cloud.* TO 'cloud'@'192.168.0.181';
+GRANT ALL PRIVILEGES ON cloud.* TO 'cloud'@'192.168.0.182';
+GRANT ALL PRIVILEGES ON cloud.* TO 'cloud'@'localhost';
+
+GRANT ALL PRIVILEGES ON cloud_usage.* TO 'cloud'@'192.168.0.180';
+GRANT ALL PRIVILEGES ON cloud_usage.* TO 'cloud'@'192.168.0.181';
+GRANT ALL PRIVILEGES ON cloud_usage.* TO 'cloud'@'192.168.0.182';
+GRANT ALL PRIVILEGES ON cloud_usage.* TO 'cloud'@'localhost';
+
+# HAProxy health check user
+CREATE USER 'haproxy_check'@'192.168.0.180' IDENTIFIED BY '';
+CREATE USER 'haproxy_check'@'192.168.0.181' IDENTIFIED BY '';
+CREATE USER 'haproxy_check'@'192.168.0.182' IDENTIFIED BY '';
+
+FLUSH PRIVILEGES;
+EOF
+
+PHASE 3 — Galera Arbitrator / garbd (Separate Node)
+3.1 Install garbd
+bash# On garbd node
+dnf install -y galera-4
+3.2 Configure garbd
+bashcat > /etc/sysconfig/garb << 'EOF'
+GALERA_NODES="192.168.0.180:4567,192.168.0.181:4567"
+GALERA_GROUP="cloudstack_cluster"
+LOG_FILE="/var/log/garbd.log"
+EOF
+3.3 Start garbd
+bashsystemctl enable --now garbd
+systemctl status garbd
+
+# Verify cluster size is now 3 (2 DB nodes + garbd)
+mariadb -u root -p -h 192.168.0.180 -e "SHOW STATUS LIKE 'wsrep_cluster_size';"
+
+PHASE 4 — HAProxy (Both Nodes)
+4.1 Install HAProxy
+bashdnf install -y haproxy
+systemctl enable haproxy
+4.2 Configure HAProxy — same config on both nodes
+bashcat > /etc/haproxy/haproxy.cfg << 'EOF'
+global
+    log /dev/log local0
+    log /dev/log local1 notice
+    maxconn 50000
+    user haproxy
+    group haproxy
+    daemon
+
+defaults
+    log     global
+    mode    tcp
+    option  tcplog
+    option  dontlognull
+    timeout connect 5s
+    timeout client  30s
+    timeout server  30s
+    retries 3
+
+#------------------------------------------------------------
+# Stats page — per node, not on VIP
+#------------------------------------------------------------
+listen stats
+    bind 192.168.0.180:9000        # change to 192.168.0.181 on node2
+    mode http
+    stats enable
+    stats uri /haproxy?stats
+    stats refresh 10s
+    stats auth admin:StrongPassword
+    stats hide-version
+    stats show-node
+
+#------------------------------------------------------------
+# MariaDB Galera
+#------------------------------------------------------------
+listen galera_cluster
+    bind 192.168.0.182:3306
+    mode tcp
+    balance leastconn
+    option tcpka
+    option mysql-check user haproxy_check post-41
+    default-server inter 3s fall 3 rise 2
+    server galera1 192.168.0.180:3306 check
+    server galera2 192.168.0.181:3306 check
+
+#------------------------------------------------------------
+# CloudStack Management — HTTP
+#------------------------------------------------------------
+listen cloudstack_http
+    bind 192.168.0.182:8089
+    mode http
+    balance roundrobin
+    cookie JSESSIONID prefix nocache
+    option httpchk GET /client/api?command=listApis&response=json
+    http-check expect status 200
+    timeout check 10s
+    default-server inter 5s fall 2 rise 3
+    server cs-mgmt1 192.168.0.180:8080 check cookie apcs1
+    server cs-mgmt2 192.168.0.181:8080 check cookie apcs2
+
+#------------------------------------------------------------
+# CloudStack Management — HTTPS
+#------------------------------------------------------------
+listen cloudstack_https
+    bind 192.168.0.182:8490
+    mode tcp
+    balance roundrobin
+    default-server inter 5s fall 2 rise 3
+    server cs-mgmt1 192.168.0.180:8443 check
+    server cs-mgmt2 192.168.0.181:8443 check
+EOF
+
+On node2 change the stats bind line to 192.168.0.181:9000
+
+4.3 Validate and start
+bashhaproxy -c -f /etc/haproxy/haproxy.cfg
+systemctl start haproxy
+systemctl status haproxy
+
+PHASE 5 — Keepalived (Both Nodes)
+5.1 Install Keepalived
+bashdnf install -y keepalived
+systemctl enable keepalived
+5.2 Configure Keepalived on node1 (MASTER)
+bashcat > /etc/keepalived/keepalived.conf << 'EOF'
+global_defs {
+    router_id HAPROXY_MASTER
+    enable_script_security
+    script_user root
+}
+
+vrrp_script chk_haproxy {
+    script "/usr/bin/killall -0 haproxy"
+    interval 2
+    weight  -20
+    fall    2
+    rise    2
+    user    root
+}
+
+vrrp_instance VI_1 {
+    state             MASTER
+    interface         ens160
+    virtual_router_id 51
+    priority          150
+    advert_int        1
+
+    authentication {
+        auth_type PASS
+        auth_pass S3cur3VR
+    }
+
+    virtual_ipaddress {
+        192.168.0.182/24 dev ens160
+    }
+
+    track_script {
+        chk_haproxy
+    }
+}
+EOF
+5.3 Configure Keepalived on node2 (BACKUP)
+bashcat > /etc/keepalived/keepalived.conf << 'EOF'
+global_defs {
+    router_id HAPROXY_BACKUP
+    enable_script_security
+    script_user root
+}
+
+vrrp_script chk_haproxy {
+    script "/usr/bin/killall -0 haproxy"
+    interval 2
+    weight  -20
+    fall    2
+    rise    2
+    user    root
+}
+
+vrrp_instance VI_1 {
+    state             BACKUP
+    interface         ens160
+    virtual_router_id 51
+    priority          100
+    advert_int        1
+
+    authentication {
+        auth_type PASS
+        auth_pass S3cur3VR
+    }
+
+    virtual_ipaddress {
+        192.168.0.182/24 dev ens160
+    }
+
+    track_script {
+        chk_haproxy
+    }
+}
+EOF
+5.4 Start Keepalived — keepalived first then haproxy
+bash# On both nodes
+systemctl start keepalived
+sleep 2
+systemctl start haproxy
+
+# Verify VIP is on node1
+ip addr show ens160 | grep 192.168.0.182
+
+PHASE 6 — CloudStack Management (Both Nodes)
+6.1 Add CloudStack repository
+bashcat > /etc/yum.repos.d/cloudstack.repo << 'EOF'
+[cloudstack]
+name=cloudstack
+baseurl=http://download.cloudstack.org/el/9/4.21/
+enabled=1
+gpgcheck=0
+EOF
+6.2 Install CloudStack management
+bashdnf install -y cloudstack-management
+6.3 Configure database connection — same on both nodes
+bashcat > /etc/cloudstack/management/db.properties << 'EOF'
+cluster.servlet.port=9090
+db.cloud.host=192.168.0.182
+db.cloud.port=3306
+db.cloud.name=cloud
+db.cloud.username=cloud
+db.cloud.password=cloudpassword
+db.cloud.autoReconnect=true
+db.usage.host=192.168.0.182
+db.usage.port=3306
+db.usage.name=cloud_usage
+db.usage.username=cloud
+db.usage.password=cloudpassword
+db.usage.autoReconnect=true
+db.simulator.host=192.168.0.182
+db.simulator.port=3306
+#db.cloud.replicas=
+#db.usage.replicas=
+EOF
+6.4 Initialize database — run on node1 only
+bash# On node1 only
+cloudstack-setup-databases cloud:cloudpassword@192.168.0.182 \
+    --deploy-as=root \
+    -e file \
+    -m $(hostname -I | awk '{print $1}') \
+    -k $(hostname -I | awk '{print $1}')
+6.5 Setup management on both nodes
+bashcloudstack-setup-management
+6.6 Start CloudStack management
+bash# Start node1 first
+systemctl enable --now cloudstack-management   # on node1
+
+# Wait for node1 to fully start then start node2
+tail -f /var/log/cloudstack/management/management-server.log | grep "Successfully"
+
+# Then start node2
+systemctl enable --now cloudstack-management   # on node2
+
+PHASE 7 — Verification
+7.1 Verify Galera cluster
+bashmariadb -u root -p -h 192.168.0.182 -e "
+SHOW STATUS LIKE 'wsrep_cluster_name';
+SHOW STATUS LIKE 'wsrep_cluster_size';
+SHOW STATUS LIKE 'wsrep_cluster_status';
+SHOW STATUS LIKE 'wsrep_ready';
+SHOW STATUS LIKE 'wsrep_connected';
+"
+7.2 Verify HAProxy backends
+bash# Check stats page
+curl -u admin:StrongPassword http://192.168.0.180:9000/haproxy?stats | grep -E "galera|cloudstack"
+
+# Check all backends are UP
+echo "show stat" | socat stdio /var/run/haproxy/admin.sock | cut -d',' -f1,2,18
+7.3 Verify VIP
+bash# VIP should be on node1
+ip addr show ens160 | grep 192.168.0.182
+
+# Test DB through VIP
+mariadb -u cloud -p -h 192.168.0.182 -P 3306 cloud -e "SELECT 1;"
+
+# Test CloudStack UI
+curl -I http://192.168.0.182:8089/client
+7.4 Verify CloudStack
+bash# Check both nodes are registered as management servers
+mariadb -u cloud -p -h 192.168.0.182 cloud -e "SELECT id, name, version, status FROM mshost;"
+
+PHASE 8 — Failover Testing
+Test 1 — DB failure on node1
+bashsystemctl stop mariadb              # on node1
+journalctl -u haproxy -f | grep galera
+# Expect: galera1 DOWN, traffic moves to galera2
+mariadb -u cloud -p -h 192.168.0.182 -e "SELECT 1;"   # must still work
+systemctl start mariadb             # restore node1
+Test 2 — Management failure on node1
+bashsystemctl stop cloudstack-management    # on node1
+journalctl -u haproxy -f | grep cloudstack
+# Expect: cs-mgmt1 DOWN, traffic moves to cs-mgmt2
+curl -I http://192.168.0.182:8089/client   # must still work
+systemctl start cloudstack-management   # restore node1
+Test 3 — Full node1 failure
+bash# Simulate by stopping all services on node1
+systemctl stop cloudstack-management mariadb keepalived haproxy
+
+# On node2 — VIP should appear within 2-3 seconds
+ip addr show ens160 | grep 192.168.0.182
+
+# Portal must be accessible
+curl -I http://192.168.0.182:8089/client
+
+# Restore node1
+systemctl start keepalived haproxy mariadb cloudstack-management
+
+Recovery Procedures
+Galera cluster recovery after both nodes down
+bash# On both nodes — check grastate.dat
+cat /var/lib/mysql/grastate.dat
+
+# Find most advanced node
+mysqld_safe --wsrep-recover 2>&1 | grep "Recovered position"
+
+# On node with highest seqno — set safe_to_bootstrap
+vi /var/lib/mysql/grastate.dat
+# Set: safe_to_bootstrap: 1
+
+# Bootstrap from that node
+galera_new_cluster
+
+# Join other node normally
+systemctl start mariadb    # on other node
+
+Quick Reference
+COMPONENT         NODE1 (192.168.0.180)    NODE2 (192.168.0.181)
+──────────────────────────────────────────────────────────────────
+Keepalived        MASTER (priority 150)    BACKUP (priority 100)
+HAProxy           Active                   Active
+MariaDB Galera    galera1                  galera2
+CloudStack        cs-mgmt1                 cs-mgmt2
+VIP               Holds 192.168.0.182      Takes on node1 failure
+Garbd             192.168.0.183 (separate node)
+
+PORTS
+──────────────────────────────────────────────────────────────────
+3306   MariaDB / HAProxy Galera frontend
+4567   Galera wsrep replication
+4568   Galera IST
+4444   Galera SST
+8080   CloudStack management HTTP (backend)
+8089   CloudStack HTTP HAProxy frontend (VIP)
+8443   CloudStack management HTTPS (backend)
+8490   CloudStack HTTPS HAProxy frontend (VIP)
+9000   HAProxy stats (per node)
+112    VRRP (Keepalived)You said: thank you please Write in text format to paste in githubthank you please Write in text format to paste in github6:57 PMYou are out of free messages until 10:00 PMUpgradethank you please Write in text format to paste in github
