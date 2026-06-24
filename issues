@@ -1,6 +1,11 @@
 If primary storage is on nfs, which was assigned from CLoudstack management node. After rebooting managment node. NFS service was not enbaled, due to this, primar storage went into offline state and Host were in conneting state after management came oline. So, to resolve the issue, nfs started and then systems vm came online and hosts also connected back
 
 
+CREATE USER 'cloud'@'192.168.0.182' IDENTIFIED BY 'password';
+GRANT ALL PRIVILEGES ON cloud.* TO 'cloud'@'192.168.0.182';
+GRANT ALL PRIVILEGES ON cloud_usage.* TO 'cloud'@'192.168.0.182';
+flush privileges
+
 
 TCP mode vs HTTP mode for CloudStack
 TCP modeHTTP modeHealth checkOnly checks if port 8080 is openActually sends HTTP request and checks response codeDetects broken CS managementNo — port stays open even when CS has no DBYes — CS returns errors when DB is downSticky sessionsNot possiblePossible via cookieYour invalid session issueStill happensFixed
