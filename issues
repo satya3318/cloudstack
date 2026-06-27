@@ -64,3 +64,69 @@ haproxyserver cs-mgmt1 192.168.0.180:8080 check cookie apcs1
 server cs-mgmt2 192.168.0.181:8080 check cookie apcs2
 The name itself doesn't matter — just needs to be unique per server so HAProxy can distinguish which backend to route to. cs1 and cs2 are perfectly fine to keep as is.
 Sonnet 4.6 Low
+
+
+**********************
+his is the key. The host global setting is causing your problem.
+
+Current values:
+
+host                             = 192.168.0.180
+indirect.agent.lb.algorithm      = static
+indirect.agent.lb.check.interval = 0
+
+Because host=192.168.0.180, every KVM agent is told by CloudStack to connect to 192.168.0.180, which is why agent.properties keeps getting rewritten to:
+
+host=192.168.0.180@static
+
+When apcs1 goes down, the agents have nowhere to reconnect.
+
+Option 1 (Recommended for your setup)
+
+Since you already have HAProxy on 192.168.0.182:8080 and cannot proxy 8250, configure CloudStack to advertise both management servers instead of a single IP.
+
+Update the global setting:
+
+UPDATE configuration
+SET value='192.168.0.180,192.168.0.181'
+WHERE name='host';
+
+Then restart the management service on both servers:
+
+systemctl restart cloudstack-management
+
+After that, restart one KVM agent and check:
+
+grep "^host=" /etc/cloudstack/agent/agent.properties
+
+Ideally, it should contain both management servers instead of only 192.168.0.180.
+
+If that does not work
+
+Some CloudStack versions do not support multiple IPs in the host global setting when indirect.agent.lb.algorithm=static.
+
+In that case, there are only two supported production options:
+
+Option A
+
+Use a dedicated TCP load balancer (HAProxy) for port 8250 on a separate node, so it can own the VIP without conflicting with the management server.
+
+Option B
+
+Configure the CloudStack agent manually with multiple hosts (if your agent version supports it), instead of relying on the management server to rewrite agent.properties.
+
+Please check your CloudStack version
+
+Run:
+
+cloudstack-setup-management --version
+
+or
+
+rpm -q cloudstack-management
+
+Also, on one KVM host run:
+
+rpm -q cloudstack-agent
+
+I know you're on 4.21.0.0, but I want the exact build. There was a change in agent failover behavior in the 4.21.x series, and with the exact version I can tell you whether host=ip1,ip2 is officially supported or whether you need to use a different load-balancing algorithm.
