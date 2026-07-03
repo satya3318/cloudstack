@@ -130,3 +130,21 @@ Also, on one KVM host run:
 rpm -q cloudstack-agent
 
 I know you're on 4.21.0.0, but I want the exact build. There was a change in agent failover behavior in the 4.21.x series, and with the exact version I can tell you whether host=ip1,ip2 is officially supported or whether you need to use a different load-balancing algorithm.
+
+
+MariaDB [(none)]> CREATE USER 'root'@'192.168.122.87' IDENTIFIED BY 'password';
+Query OK, 0 rows affected (0.008 sec)
+
+MariaDB [(none)]> GRANT ALL PRIVILEGES ON *.* TO 'root'@'192.168.122.87' WITH GRANT OPTION;
+Query OK, 0 rows affected (0.007 sec)
+
+MariaDB [(none)]> CREATE USER 'root'@'rocky-node1' IDENTIFIED BY 'password';
+Query OK, 0 rows affected (0.002 sec)
+
+MariaDB [(none)]> GRANT ALL PRIVILEGES ON *.* TO 'root'@'rocky-node1' WITH GRANT OPTION;
+Query OK, 0 rows affected (0.002 sec)
+
+MariaDB [(none)]> FLUSH PRIVILEGES;
+Query OK, 0 rows affected (0.001 sec)
+
+MariaDB [(none)]> 
