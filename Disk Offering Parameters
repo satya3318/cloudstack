@@ -1,0 +1,45 @@
+** Storage type **: Determines where the disk volume is stored.
+
+1. Shared – Storage accessible across multiple hosts in a cluster/zone (e.g., NFS, iSCSI, Ceph). Enables features like live migration of VMs, since any host in the cluster can access the volume.
+2. Local – Storage that resides on the local disk of a single hypervisor host. Faster (no network overhead) but VMs using local storage generally can't be live-migrated between hosts, and there's no redundancy if that host fails.
+
+** Provisioning type ** : Controls how disk space is allocated on the underlying storage.
+
+1. Thin provisioning – Space is allocated on-demand as data is written. The volume appears full-size to the VM, but only consumes actual storage as it's used. More storage-efficient, allows over-provisioning.
+2. Sparse provisioning – Similar concept to thin, but implementation depends on the storage backend (e.g., some storage plugins define sparse separately from thin, with different allocation/zero-writing behavior).
+3. Fat provisioning (sometimes shown as "Fat") – Full disk space is allocated immediately upon volume creation, regardless of actual usage. Better for guaranteed I/O performance/predictability, but less space-efficient.
+
+** Encrypt **
+Toggle to enable volume encryption at rest. When enabled, data written to the disk is encrypted using the hypervisor's/storage's encryption support (where available). Protects data if physical disks are removed or accessed outside the platform.
+
+** Disk size strictness **
+When enabled, this locks the disk size defined in the offering — users creating a volume/VM from this offering cannot override or resize the disk size at creation time. When disabled, the size can be adjusted (subject to the "Custom disk size" setting below).
+
+** Custom disk size **
+When toggled on, this allows the user creating the disk/VM to specify a custom size rather than being restricted to a fixed size defined by the admin in the offering. If off, a fixed size field (not shown here since it's toggled on) would appear where the admin sets an exact GB value.
+                                                                                                                                                
+                                                                                                                                                  ** QoS type ** : Defines how I/O performance limits (Quality of Service) are enforced on the disk:
+
+1. None – No I/O throttling; the disk uses whatever performance the storage can provide.
+3 .Hypervisor – I/O limits (IOPS/throughput) are enforced by the hypervisor layer (e.g., KVM/VMware disk I/O throttling settings like bytes/IOPS read-write rates).
+3. Storage – I/O limits are enforced by the underlying storage system itself (relevant when using storage plugins that support QoS natively, e.g., SolidFire, which supports Min/Max/Burst IOPS).
+
+** Write-cache Type ** :Controls the disk caching mode used by the hypervisor for this volume:
+
+1. No disk cache – Writes bypass host cache and go directly to storage (safest for data integrity, since a host crash won't lose cached writes, but can be slower).
+2. Write-back – Writes are cached and acknowledged to the VM immediately, then flushed to storage later. Faster, but a host failure before flush could cause data loss.
+3. Write-through – Writes are cached but also immediately written to storage (acknowledged only after committed to disk). Safer than write-back but less risky-fast than pure caching.
+4. Hypervisor default – Uses whatever the hypervisor's own default caching behavior is, rather than an explicit setting.
+
+** Storage tags **
+Free-text tag(s) that link this disk offering to specific storage pools tagged with the same value. When a volume is created using this offering, CloudStack will only place it on primary storage pools that carry a matching tag — this lets admins direct offerings to particular storage backends (e.g., SSD-tagged pools vs. HDD-tagged pools).
+
+** Public ** :Toggle controlling offering visibility:
+
+On – The disk offering is visible/available to all accounts/domains/users in the cloud.
+Off – The offering is private, usually restricted to specific domains or accounts (additional fields for domain/account restriction typically appear when this is toggled off).
+
+** Zone **
+Specifies which availability zone(s) this disk offering is valid for. A disk offering can be scoped to one, several, or all zones — restricting where end users can provision volumes using this offering. (This field is cut off in the image but would let you select specific zones or "All Zones.")
+
+If you're setting this up for a specific use case (e.g., high-performance SSD tier vs. capacity/HDD tier), I can suggest a recommended combination of these settings — just let me know your storage backend and workload goals.
