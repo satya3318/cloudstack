@@ -43,3 +43,33 @@ Off – The offering is private, usually restricted to specific domains or accou
 Specifies which availability zone(s) this disk offering is valid for. A disk offering can be scoped to one, several, or all zones — restricting where end users can provision volumes using this offering. (This field is cut off in the image but would let you select specific zones or "All Zones.")
 
 If you're setting this up for a specific use case (e.g., high-performance SSD tier vs. capacity/HDD tier), I can suggest a recommended combination of these settings — just let me know your storage backend and workload goals.
+
+*** MAX Disk size ***
+
+Request failed. (431)
+The maximum size for a disk is 2000 GB. When creating disk offering for 5TB. Is the hardcoded limit
+
+Yes — that 2000 GB limit is a known CloudStack configuration constraint, not something baked immutably into the code. Here's the detail:
+
+The setting responsible
+CloudStack has a global configuration parameter called:
+
+vm.disk.size.max (in some versions/docs also referenced via storage.max.volume.size or similar depending on version)
+
+By default, in most CloudStack versions this is set to 2000 GB (2 TB), which matches the exact error you're seeing.
+
+How to fix it
+1. Go to Global Settings (as an admin) in the CloudStack UI.
+2. Search for vm.disk.size.max (or storage.max.volume.size — the exact key name varies slightly by version, e.g. 4.x branches).
+3. Update the value to your desired max (e.g., 5000 for 5 TB, or higher).
+4. Restart the Management Server for the change to take effect (systemctl restart cloudstack-management or equivalent) — global settings like this typically require a mgmt-server restart, not just a save.
+
+Things to double-check afterward
+Underlying storage/hypervisor limits: Even after raising the CloudStack-level limit, your actual primary storage (NFS, iSCSI, Ceph, VMware VMFS, etc.) and hypervisor (KVM, VMware, XenServer) may have their own max volume/LUN size limits. For example, older VMFS versions cap at 2TB or 64TB depending on version; NFS depends on the backing filesystem.
+Snapshot/backup limits: Some snapshot providers also have size ceilings that are separate from this setting.
+Per-hypervisor differences: KVM with qcow2/raw generally scales well past 2TB, but confirm your specific storage plugin (if using SolidFire, StorPool, Ceph/RBD, etc.) supports the size you want.
+So: not hardcoded in an unchangeable sense — it's a global setting you can raise, but you'll want to verify the actual storage backend can support 5TB volumes before pushing the CloudStack limit up.
+
+
+
+
